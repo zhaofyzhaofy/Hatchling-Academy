@@ -212,6 +212,25 @@ body{
 /* 顶部工具条 */
 .topbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex:0 0 auto}
 .topbar .grow{flex:1;font-weight:800;font-size:17px;color:var(--ink2);text-align:center}
+
+/* 首次进入：声音解锁层（手机浏览器要求先有一次真实点击才允许朗读） */
+#audioGate{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;
+  background:rgba(30,44,74,.55);padding:24px}
+#audioGate.show{display:flex}
+#audioGate .gate{background:#fff;border-radius:30px;padding:32px 26px 24px;text-align:center;
+  max-width:340px;width:100%;box-shadow:0 18px 44px rgba(20,40,80,.32);animation:fadeUp .3s ease}
+#audioGate .gem{font-size:62px;line-height:1;animation:bob 1.6s ease-in-out infinite}
+#audioGate .gt{font-size:23px;font-weight:900;margin:12px 0 8px}
+#audioGate .gd{font-size:14px;color:var(--ink2);font-weight:600;line-height:1.65;margin-bottom:20px}
+#audioGate .gb{width:100%;font-size:20px;padding:15px 0}
+
+/* 声音异常时的一次性提示条 */
+#audioTip{position:fixed;left:50%;bottom:16px;z-index:70;max-width:88vw;
+  transform:translateX(-50%) translateY(180%);transition:transform .35s ease;
+  background:rgba(40,44,66,.95);color:#fff;font-size:13.5px;font-weight:600;line-height:1.6;
+  padding:12px 17px;border-radius:16px;box-shadow:0 10px 26px rgba(20,30,60,.35)}
+#audioTip.show{transform:translateX(-50%) translateY(0)}
+#audioTip b{color:#ffd76a}
 </style>
 </head>
 <body>
@@ -306,6 +325,17 @@ body{
   </div>
   <button class="bparent" id="bParent">家长验证</button>
 </div>
+
+<!-- ========== 首次进入：解锁声音（必须在用户手势里） ========== -->
+<div id="audioGate">
+  <div class="gate">
+    <div class="gem">🔊</div>
+    <div class="gt">先点一下，打开声音</div>
+    <div class="gd">手机的浏览器要求先点一次屏幕，<br>才能把字读出来哦～</div>
+    <button class="btn pink gb" id="gateBtn">点我开始</button>
+  </div>
+</div>
+<div id="audioTip"></div>
 
 <script>
 /* ================= 小工具 ================= */
@@ -680,23 +710,100 @@ const SFX = {
 };
 
 /* ================= 朗读 ================= */
+/* 手机端没有声音，基本是这四件事：①朗读必须在"用户点过屏幕"之后才被放行
+   ②cancel() 是异步的，紧接着 speak() 会被吞掉 ③voice 指向了没下载的语音会静默失败
+   ④微信/QQ 内置浏览器普遍屏蔽朗读。下面逐条绕开。 */
+
 let voice = null;
 function pickVoice(){
   if(!('speechSynthesis' in window)) return;
-  const vs = speechSynthesis.getVoices();
-  voice = vs.find(v=>/zh[-_]?CN|Chinese|中文|普通话/i.test(v.lang+v.name))
-       || vs.find(v=>/zh/i.test(v.lang)) || null;
+  let vs = [];
+  try{ vs = speechSynthesis.getVoices() || []; }catch(e){ return; }
+  if(!vs.length) return;                       // iOS 首帧常为空，等 onvoiceschanged 再来
+  const zh = vs.filter(v => /^zh/i.test(v.lang || '') && v.localService !== false);
+  voice = zh.find(v => /^zh[-_]?CN/i.test(v.lang))
+       || zh.find(v => /Chinese|中文|普通话|Mandarin|Tingting|婷婷/i.test(v.name))
+       || zh[0] || null;                       // 找不到就留空，只靠 lang 让引擎自己挑
 }
 if('speechSynthesis' in window){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-function speak(text){
-  if(!('speechSynthesis' in window) || !text) return;
+
+let audioReady = false;   // 是否已在用户手势里解锁过
+let speakSeq  = 0;        // 每次朗读发一个号，让"被取消的上一句"的回调自动失效
+
+const isInApp = /MicroMessenger|QQ\/|Weibo|AlipayClient|DingTalk|Workplace/i.test(navigator.userAgent);
+const noTtsMsg   = () => '这个浏览器不支持语音朗读。' + (isInApp
+  ? '请点右上角「···」→ <b>在浏览器中打开</b>'
+  : '建议改用 <b>Safari</b> 或 <b>Chrome</b> 打开');
+const ttsFailMsg = () => isInApp
+  ? '读不出声音：微信/QQ 内置浏览器会屏蔽朗读，请点右上角「···」→ <b>在浏览器中打开</b>'
+  : '读不出声音？请检查手机侧边的<b>静音开关</b>，或到系统设置里下载<b>中文语音包</b>';
+
+let tipTimer = null;
+function showAudioTip(html){
+  const el = $('#audioTip'); if(!el) return;
+  el.innerHTML = html;
+  el.classList.add('show');
+  clearTimeout(tipTimer);
+  tipTimer = setTimeout(() => el.classList.remove('show'), 9000);
+}
+
+/* 只能在用户手势的同步调用栈里执行：一次性放行 AudioContext 和语音合成。
+   这里刻意不走 speak()，因为那个有 90ms 延后，一延后手势就失效了。 */
+function unlockAudio(firstWords){
+  actx();
+  if(audioReady) return;
+  audioReady = true;
+  if(!('speechSynthesis' in window)){ showAudioTip(noTtsMsg()); return; }
+  doSpeak(firstWords || ' ', false, speakSeq);   // 同步朗读：既解锁，又立刻出声
+}
+
+/* 主动停止（切页面、弹休息遮罩时用），同时作废待读的那一句 */
+function stopSpeak(){
+  speakSeq++;
+  if(!('speechSynthesis' in window)) return;
   try{ speechSynthesis.cancel(); }catch(e){}
-  const u = new SpeechSynthesisUtterance(text);
+}
+
+function speak(text){
+  if(!text) return;
+  if(!('speechSynthesis' in window)){ showAudioTip(noTtsMsg()); return; }
+  stopSpeak();
+  const seq = speakSeq;
+  setTimeout(() => { if(seq === speakSeq) doSpeak(text, false, seq); }, 90);
+}
+
+function doSpeak(text, noVoice, seq){
+  if(seq !== speakSeq) return;
+  let u;
+  try{ u = new SpeechSynthesisUtterance(text); }catch(e){ showAudioTip(ttsFailMsg()); return; }
   u.lang = 'zh-CN'; u.rate = 0.72; u.pitch = 1.35; u.volume = 1;
-  if(voice) u.voice = voice;
-  try{ speechSynthesis.speak(u); }catch(e){}
+  if(voice && !noVoice) u.voice = voice;
+
+  let started = false, settled = false, wd = null;
+  const giveUp = () => {                       // 带 voice 读不出来，就摘掉 voice 再试一次
+    if(settled) return;                        // watchdog 和 onerror 可能同时到，只认第一次
+    settled = true;
+    clearTimeout(wd);
+    if(seq !== speakSeq) return;
+    if(!noVoice && voice) doSpeak(text, true, seq);
+    else showAudioTip(ttsFailMsg());
+  };
+  u.onstart = () => { started = settled = true; clearTimeout(wd); };
+  u.onerror = e => {
+    if(started || settled || seq !== speakSeq) return;
+    if(/cancel|interrupt/i.test((e && e.error) || '')) return;
+    giveUp();
+  };
+  wd = setTimeout(() => {                      // 引擎既不发声也不报错（安卓上很常见）
+    if(started || seq !== speakSeq) return;
+    try{ speechSynthesis.cancel(); }catch(e){}
+    giveUp();
+  }, 1100);
+
+  try{ speechSynthesis.speak(u); }catch(e){ clearTimeout(wd); giveUp(); }
 }
 function sayItem(it){ speak(it.sp || ((it.say || it.z) + '，' + it.word)); }
+
 
 /* ================= 数字出题 ================= */
 function numOpts(ans){
@@ -912,7 +1019,7 @@ function buildZiQ(pool){
 function go(name){
   $$('.screen').forEach(s => s.classList.remove('active'));
   $('#scr-'+name).classList.add('active');
-  if(name !== 'quiz'){ try{ speechSynthesis.cancel(); }catch(e){} }
+  if(name !== 'quiz') stopSpeak();
 }
 function saveStars(){ localStorage.setItem('py_stars', state.stars); }
 
@@ -958,10 +1065,23 @@ function renderHome(){
 }
 
 /* ================= 学一学 ================= */
+/* 每个模块上次看到第几张卡片，存在本地（换浏览器/换设备不同步） */
+const PROGRESS_KEY = 'py_progress';
+let progress = {};
+try{ progress = JSON.parse(localStorage.getItem(PROGRESS_KEY) || '{}') || {}; }catch(e){ progress = {}; }
+function saveProgress(){
+  try{ localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); }catch(e){}
+}
+/* 越界或脏数据一律退回第 1 张，避免模块内容增减后定位到不存在的卡片 */
+function lastIdx(id, len){
+  const v = progress[id];
+  return (Number.isInteger(v) && v >= 0 && v < len) ? v : 0;
+}
+
 function startLearn(id){
   state.groupId = id;
   state.group = GROUPS.find(g => g.id === id);
-  state.learnIdx = 0;
+  state.learnIdx = lastIdx(id, state.group.items.length);
   go('learn'); renderLearn();
 }
 function renderLearn(){
@@ -988,9 +1108,40 @@ function renderLearn(){
 function learnStep(d){
   const n = state.group.items.length;
   state.learnIdx = (state.learnIdx + d + n) % n;
+  progress[state.groupId] = state.learnIdx; saveProgress();
   const card = $('#letterCard');
   card.classList.remove('flip'); void card.offsetWidth; card.classList.add('flip');
   renderLearn();
+}
+
+/* ================= 错题本 ================= */
+/* 答错的题整道存下来（题目对象本身就是纯数据），下次闯关优先复习，答对即移出 */
+const WRONG_KEY = 'py_wrong';
+const WRONG_MAX = 20;        // 每个模块最多留 20 道，超了丢最旧的
+const WRONG_IN_QUIZ = 4;     // 每次闯关最多安排 4 道复习题
+let wrongBook = {};
+try{ wrongBook = JSON.parse(localStorage.getItem(WRONG_KEY) || '{}') || {}; }catch(e){ wrongBook = {}; }
+function saveWrong(){
+  try{ localStorage.setItem(WRONG_KEY, JSON.stringify(wrongBook)); }catch(e){}
+}
+function wrongList(id){
+  const a = wrongBook[id];
+  return Array.isArray(a) ? a : [];
+}
+/* 同一个知识点只留一条，否则同一个字母答错两次会在一轮里出现两遍 */
+function wrongKeyOf(q){
+  return [q.kind, q.ansKey, q.stage.expr || '', q.stage.visual || ''].join('|');
+}
+function addWrong(id, q){
+  const list = wrongList(id).filter(x => wrongKeyOf(x) !== wrongKeyOf(q));
+  list.push(q);
+  while(list.length > WRONG_MAX) list.shift();
+  wrongBook[id] = list; saveWrong();
+}
+function removeWrong(id, q){
+  const list = wrongList(id);
+  const next = list.filter(x => wrongKeyOf(x) !== wrongKeyOf(q));
+  if(next.length !== list.length){ wrongBook[id] = next; saveWrong(); }
 }
 
 /* ================= 玩一玩 ================= */
@@ -1012,6 +1163,10 @@ function startQuiz(id){
   }else{
     list = shuffle(g.items).slice(0, QUIZ_LEN).map(ans => buildPinyinQ(ans, g.items));
   }
+  /* 用错题替换掉最前面几道新题，总量仍是 10 道；选项重新打乱，免得孩子记住按钮位置 */
+  const review = shuffle(wrongList(id)).slice(0, WRONG_IN_QUIZ)
+    .map(q => Object.assign({}, q, { opts: shuffle(q.opts) }));
+  if(review.length) list = shuffle(review.concat(list.slice(review.length)));
   state.quiz = { list, idx:0, right:0, combo:0, best:0, earned:0, locked:false };
   $('#quizTitle').textContent = g.emoji + ' ' + g.name;
   go('quiz'); renderQuiz();
@@ -1074,10 +1229,12 @@ function pick(o, btn){
     const pulse = $('#quizStars'); pulse.classList.remove('pop'); void pulse.offsetWidth; pulse.classList.add('pop');
     if(q.combo >= 3){ const c = $('#quizCombo'); c.classList.remove('show'); void c.offsetWidth; c.classList.add('show'); }
     bumpStars(1);
+    removeWrong(state.groupId, cur);
     setTimeout(nextQ, 900);
   }else{
     btn.classList.add('wrong');
     SFX.wrong(); q.combo = 0;
+    addWrong(state.groupId, cur);
     $('#quizCombo').textContent = '';
     const rightOpt = $$('#quizOpts .opt').find(b => b.dataset.key === cur.ansKey);
     if(rightOpt) rightOpt.classList.add('right');
@@ -1198,7 +1355,7 @@ function showBlocker(kind, secLeft){
   }
   if(entering){
     b.classList.add('show');
-    try{ speechSynthesis.cancel(); }catch(e){}
+    stopSpeak();
     if(kind === 'rest') nextRestTask();      // 只在进入休息那一刻抽任务，否则每秒都会换
   }
 }
@@ -1234,6 +1391,21 @@ function tick(){
   updateMeter();
 }
 
+/* 家长侧看一眼错题本，顺手可清空（孩子不识字，所以只放在家长验证后面） */
+function reviewWrongBook(){
+  const rows = GROUPS
+    .map(g => ({ id: g.id, name: g.name, n: wrongList(g.id).length }))
+    .filter(r => r.n > 0);
+  if(!rows.length) return;                                  // 空的就不多弹一个框
+  const total = rows.reduce((s, r) => s + r.n, 0);
+  const detail = rows.map(r => r.name + ' ' + r.n + ' 道').join('、');
+  const msg = '错题本：共 ' + total + ' 道\n' + detail +
+              '\n\n点「确定」清空；点「取消」保留，下次闯关仍会优先复习。';
+  if(!window.confirm(msg)) return;
+  rows.forEach(r => { delete wrongBook[r.id]; });
+  saveWrong();
+}
+
 /* 家长出口：一道乘法题，孩子做不出，家长一秒过 */
 function parentGate(){
   const a = 6 + rnd(4), c = 6 + rnd(4);
@@ -1250,6 +1422,7 @@ function parentGate(){
   saveUsage(true);
   updateBlocker();
   updateMeter();
+  reviewWrongBook();
 }
 
 /* ================= 启动 ================= */
@@ -1259,7 +1432,22 @@ $('#letterCard').addEventListener('click', () => {
 $('#bParent').addEventListener('click', parentGate);
 $('#bTaskNext').addEventListener('click', () => { SFX.tap(); nextRestTask(); });
 document.addEventListener('click', () => { actx(); }, {once:true});
-document.addEventListener('visibilitychange', () => { if(!document.hidden) tick(); });
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) return;
+  tick();
+  if('speechSynthesis' in window){ try{ speechSynthesis.resume(); }catch(e){} }
+});
+
+/* 首次进入先解锁声音：这一步必须发生在用户手势里，晚一步手机就不给读了 */
+const gateEl = $('#audioGate');
+if('speechSynthesis' in window) gateEl.classList.add('show');
+else showAudioTip(noTtsMsg());
+
+$('#gateBtn').addEventListener('click', () => {
+  unlockAudio('你好呀，我们一起学拼音吧');   // 同步执行，不能包进 setTimeout，否则手势就失效了
+  gateEl.classList.remove('show');
+  SFX.tap();
+});
 
 renderHome();
 loadUsage();
