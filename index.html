@@ -36,8 +36,9 @@ body{
   background:#b6ecb0;opacity:.5}
 
 /* 屏幕容器 */
-#app{position:relative;z-index:1;height:100%;display:flex;flex-direction:column;
-  max-width:620px;margin:0 auto;padding:14px 16px 18px}
+#app{position:relative;z-index:1;height:100%;height:100dvh;display:flex;flex-direction:column;
+  max-width:620px;margin:0 auto;
+  padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
 .screen{display:none;flex-direction:column;height:100%;animation:fadeUp .32s ease}
 .screen.active{display:flex}
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
@@ -58,10 +59,18 @@ body{
 .subtitle{text-align:center;color:var(--ink2);font-size:14px;font-weight:600;margin-bottom:14px}
 
 /* 关卡卡片 */
-.list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding-bottom:8px}
+/* min-height:0 + 可滚动：卡片数量超过一屏时让列表滚动，而不是把卡片压扁 */
+.list{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  display:flex;flex-direction:column;gap:14px;scrollbar-width:none;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom))}
+.list::-webkit-scrollbar{display:none}
+/* flex:0 0 auto 很关键：.gcard 带了 overflow:hidden，自动最小高度会退化为 0，
+   不加这行卡片就会被挤在一起、文字和按钮叠出卡片外 */
 .gcard{background:var(--card);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow);
   display:flex;align-items:center;gap:14px;position:relative;overflow:hidden;
-  animation:fadeUp .4s ease backwards}
+  flex:0 0 auto;animation:fadeUp .4s ease backwards}
+.gcard .acts{display:flex;gap:8px;margin-top:10px}
+.gcard .acts .btn{flex:1;white-space:nowrap}
 .gcard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:9px;background:var(--accent)}
 .gcard .ico{width:58px;height:58px;flex:0 0 auto;border-radius:20px;display:grid;place-items:center;
   font-size:31px;background:var(--soft)}
@@ -1055,12 +1064,12 @@ function renderHome(){
       '<div class="info"><div class="nm">'+g.name+'</div>'+
       '<div class="meta">'+(g.locked ? '🚧 即将开放' : g.items.length+' 个'+g.unit)+'</div></div>';
     if(!g.locked){
-      const bw = document.createElement('div'); bw.style.cssText = 'width:100%';
+      const bw = document.createElement('div'); bw.className = 'acts';
       const b1 = document.createElement('button');
       b1.className = 'btn small pink'; b1.textContent = '学一学';
       b1.onclick = () => { SFX.tap(); startLearn(g.id); };
       const b2 = document.createElement('button');
-      b2.className = 'btn small green'; b2.textContent = '玩一玩'; b2.style.marginLeft = '8px';
+      b2.className = 'btn small green'; b2.textContent = '玩一玩';
       b2.onclick = () => { SFX.tap(); startQuiz(g.id); };
       bw.append(b1, b2);
       d.querySelector('.info').appendChild(bw);
