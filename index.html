@@ -245,6 +245,10 @@ body{
   padding:12px 17px;border-radius:16px;box-shadow:0 10px 26px rgba(20,30,60,.35)}
 #audioTip.show{transform:translateX(-50%) translateY(0)}
 #audioTip b{color:#ffd76a}
+#audioTip .tipcopy{display:inline-block;margin-left:6px;border:0;border-radius:10px;
+  padding:4px 10px;font-family:inherit;font-size:13px;font-weight:800;color:#3b3b52;
+  background:#ffd76a;box-shadow:0 3px 0 rgba(0,0,0,.22);cursor:pointer}
+#audioTip .tipcopy:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(0,0,0,.22)}
 </style>
 </head>
 <body>
@@ -744,13 +748,42 @@ if('speechSynthesis' in window){ pickVoice(); speechSynthesis.onvoiceschanged = 
 let audioReady = false;   // 是否已在用户手势里解锁过
 let speakSeq  = 0;        // 每次朗读发一个号，让"被取消的上一句"的回调自动失效
 
-const isInApp = /MicroMessenger|QQ\/|Weibo|AlipayClient|DingTalk|Workplace/i.test(navigator.userAgent);
-const noTtsMsg   = () => '这个浏览器不支持语音朗读。' + (isInApp
-  ? '请点右上角「···」→ <b>在浏览器中打开</b>'
-  : '建议改用 <b>Safari</b> 或 <b>Chrome</b> 打开');
-const ttsFailMsg = () => isInApp
-  ? '读不出声音：微信/QQ 内置浏览器会屏蔽朗读，请点右上角「···」→ <b>在浏览器中打开</b>'
-  : '读不出声音？请检查手机侧边的<b>静音开关</b>，或到系统设置里下载<b>中文语音包</b>';
+/* 容器识别：微信/QQ/头条/抖音这类内置浏览器和部分系统 WebView 不提供语音合成。
+   尽量认全，认不出时再按系统给出对应的浏览器建议（安卓没有 Safari） */
+const UA = navigator.userAgent;
+const isIOS = /iPad|iPhone|iPod/.test(UA);
+const isAndroid = /Android/i.test(UA);
+const isInApp = /MicroMessenger|QQ\/|Weibo|AlipayClient|DingTalk|Workplace|ToutiaoMicroApp|NewsArticle|aweme|Quark|UCBrowser|MiuiBrowser|HuaweiBrowser|baiduboxapp|SogouMobileBrowser/i.test(UA);
+
+const inAppHint  = '请点右上角「···」→ <b>在浏览器中打开</b>';
+const copyBtn    = isInApp ? ' <button class="tipcopy" onclick="copyLink()">复制网址</button>' : '';
+const browserHint = isAndroid ? '请在 <b>Chrome</b> 里打开'
+                  : isIOS     ? '请在 <b>Safari</b> 里打开'
+                              : '建议改用 <b>Chrome</b> 打开';
+
+const noTtsMsg   = () => '这个浏览器不支持语音朗读。' + (isInApp ? inAppHint : browserHint) + copyBtn;
+const ttsFailMsg = () => {
+  if(isInApp) return '读不出声音：这个 App 的内置浏览器会屏蔽朗读。' + inAppHint + copyBtn;
+  if(isIOS)   return '读不出声音？请检查手机侧边的<b>静音开关</b>，或到系统设置里下载<b>中文语音包</b>';
+  return '读不出声音？请检查<b>媒体音量</b>，再到 设置 → 语言和输入法 → 文字转语音输出，选好引擎并下载<b>中文语音数据</b>';
+};
+
+/* 一键把网址复制走，方便切到系统浏览器打开 */
+function copyLink(){
+  const url = location.href.split('#')[0];
+  const done = () => showAudioTip('网址已复制，去 Chrome 地址栏粘贴打开');
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = url; ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); }catch(e){}
+    ta.remove(); done();
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(done, fallback);
+  }else fallback();
+}
 
 let tipTimer = null;
 function showAudioTip(html){
